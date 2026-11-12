@@ -4,6 +4,9 @@ Un file di stato **scritto dal training mentre gira**, letto da un monitor (app,
 parsing dei log. Generico: funziona per SFT, RL (GRPO/PPO), eval e loop custom. Solo libreria standard;
 `transformers` e `wandb` sono opzionali.
 
+Pensato per l'app [ClusterControl](https://github.com/GiuseppeBellamacina/cluster-control-android), che pilota una catena
+di job SLURM dal telefono; il formato però non dipende da nessuna app.
+
 ```mermaid
 flowchart LR
   T[Training] -->|callback HF / wandb.log / API manuale| R[RunStatus]
