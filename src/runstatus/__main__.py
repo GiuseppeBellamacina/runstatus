@@ -42,7 +42,7 @@ def render(d: dict) -> str:
 
 def main(argv: list[str]) -> int:
     args = [a for a in argv if not a.startswith("--")]
-    path = args[1] if len(args) > 1 else "logs/run_status.json"
+    path = args[1] if len(args) > 1 else "run_status/run_status.json"
     while True:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
