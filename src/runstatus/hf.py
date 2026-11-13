@@ -42,7 +42,7 @@ class RunStatusCallback(TrainerCallback):
             logs = {k: v for k, v in logs.items() if k not in _SKIP}
             if self.transform:
                 logs = self.transform(logs, state) or {}
-            self.status.set(epoch=state.epoch)
+            self.status.set(epoch=state.epoch, total_steps=state.max_steps or None)  # the trainer knows the real total
             self.status.log(state.global_step, **logs)
 
     def on_prediction_step(self, args, state, control, **kw):

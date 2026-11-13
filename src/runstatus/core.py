@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -23,12 +24,30 @@ SERIES_EVERY = 15.0  # seconds between sidecar (series file) writes
 
 
 def default_path() -> Path:
-    """$RUNSTATUS_PATH, else logs/run_status-<SLURM_JOB_ID>.json under SLURM, else logs/run_status.json."""
+    """$RUNSTATUS_PATH, else <$RUNSTATUS_DIR or run_status>/<SLURM_JOB_ID>.json, else .../run_status.json.
+
+    A dedicated folder keeps these files out of the scheduler's log directory.
+    """
     env = os.environ.get("RUNSTATUS_PATH")
     if env:
         return Path(env)
+    base = Path(os.environ.get("RUNSTATUS_DIR") or "run_status")
     job = os.environ.get("SLURM_JOB_ID")
-    return Path("logs") / (f"run_status-{job}.json" if job else "run_status.json")
+    return base / (f"{job}.json" if job else "run_status.json")
+
+
+_OWN_FILE = re.compile(r"^(\d+|run_status)(\.series)?\.json$")
+
+
+def _prune(folder: Path, keep_days: float) -> None:
+    """Delete our own files (<jobid>.json, <jobid>.series.json, run_status.json) older than ``keep_days``."""
+    limit = time.time() - keep_days * 86400
+    for f in folder.iterdir():
+        try:
+            if _OWN_FILE.match(f.name) and f.is_file() and f.stat().st_mtime < limit:
+                f.unlink()
+        except OSError:
+            pass
 
 # direction used to track the best value when `best` does not say otherwise
 _AUTO_BEST = (("*loss*", "min"), ("*error*", "min"), ("*perplexity*", "min"), ("*kl*", None),
@@ -43,8 +62,9 @@ def _match(key: str, patterns: Iterable[str] | None) -> bool:
 class RunStatus:
     """
     Args:
-        path: status file (default: see default_path). Series go to the sidecar ``<path>.series.json`` so the
-            main file stays small enough to be read on every poll.
+        path: status file (default: see default_path). Series go to the sidecar ``<path without .json>.series.json``
+            so the main file stays small enough to be read on every poll.
+        keep_days: on start, delete our own files older than this in the same folder (None: keep everything).
         kind: free label, e.g. "train", "eval", "rl".
         throttle: min seconds between non-forced writes.
         max_points: max points per series (decimated beyond that).
@@ -61,14 +81,14 @@ class RunStatus:
 
     def __init__(self, path: str | os.PathLike | None = None, *, kind: str = "train",
                  name: str | None = None, total_steps: int | None = None,
-                 throttle: float = 2.0, max_points: int = 400,
+                 throttle: float = 2.0, max_points: int = 200, keep_days: float | None = 30,
                  include: list[str] | None = None, exclude: list[str] | None = None,
                  rename: dict[str, str] | None = None, best: dict[str, str] | None = None,
                  average: list[str] | None = None, window: int = 50,
                  series: list[str] | None = None, extra: dict[str, Any] | None = None,
                  events_max: int = 20):
         self.path = Path(path) if path else default_path()
-        self.series_path = self.path.with_name(self.path.name + ".series.json")
+        self.series_path = self.path.with_suffix(".series.json")
         self._series_at = 0.0
         self.throttle, self.max_points = throttle, max_points
         self.include, self.exclude, self.rename = include, exclude or [], rename or {}
@@ -79,6 +99,8 @@ class RunStatus:
         self._first: tuple[float, int] | None = None  # (time, step) of the first logged step: rate ignores resume offset
         self._last_write = 0.0
         self._warned = False
+        if keep_days is not None and self.path.parent.is_dir():
+            _prune(self.path.parent, keep_days)
         self._stride = 1
         self._seen: dict[str, int] = {}
         self._sum: dict[str, tuple[float, int]] = {}
@@ -125,7 +147,8 @@ class RunStatus:
             if note is not None:
                 self.d["note"] = note
             if total_steps is not None:
-                self.d["progress"]["total_steps"] = total_steps
+                self.d["progress"]["total_steps"] = int(total_steps) or None  # 0 means unknown
+                self._pct()
             if epoch is not None:
                 self.d["progress"]["epoch"] = round(float(epoch), 4)
             if wandb:
@@ -225,8 +248,14 @@ class RunStatus:
             tot = p["total_steps"]
             if tot:
                 p["eta_s"] = max(0, int((tot - step) / rate))
-        if p["total_steps"]:
-            p["pct"] = round(100 * min(step, p["total_steps"]) / p["total_steps"], 2)
+        self._pct()
+
+    def _pct(self) -> None:
+        """Never report more than 100%: a step past the declared total means the total was wrong, so raise it."""
+        p = self.d["progress"]
+        if p["total_steps"] and p["step"] is not None:
+            p["total_steps"] = max(p["total_steps"], p["step"])
+            p["pct"] = round(100 * p["step"] / p["total_steps"], 2)
 
     def _add_point(self, key: str, step: int, value: float) -> None:
         # keep one point every `stride`; when full, drop every other point and double the stride
@@ -235,7 +264,7 @@ class RunStatus:
         if n % self._stride:
             return
         s = self.d["series"].setdefault(key, [])
-        s.append([step, value])
+        s.append([step, float(f"{value:.6g}")])  # 6 significant digits: the sidecar travels over slow links
         if len(s) > self.max_points:
             self._stride *= 2
             for k in self.d["series"]:

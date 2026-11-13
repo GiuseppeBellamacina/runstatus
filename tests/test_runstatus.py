@@ -83,7 +83,7 @@ def test_include_exclude_rename_best_rule(tmp_path):
     s.finish()  # forces the series sidecar
     d = read(tmp_path / "s.json")
     assert "debug/x" not in d["metrics"]["latest"] and d["metrics"]["latest"]["lr"] == 0.1
-    assert d["metrics"]["best"]["custom"] == 3.0 and list(read(tmp_path / "s.json.series.json")["series"]) == ["loss"]
+    assert d["metrics"]["best"]["custom"] == 3.0 and list(read(tmp_path / "s.series.json")["series"]) == ["loss"]
 
 
 def test_extra_events_eval_and_context_manager(tmp_path):
@@ -125,23 +125,69 @@ def test_sidecar_and_reset_series(tmp_path):
     for i in (1, 2, 3):
         s.log(i, loss=1.0 / i)
     s.finish()
-    side = read(tmp_path / "s.json.series.json")
+    side = read(tmp_path / "s.series.json")
     assert [pt[0] for pt in side["series"]["loss"]] == [1, 2, 3] and side["total_steps"] == 100
-    assert read(p)["series_file"] == "s.json.series.json"
+    assert read(p)["series_file"] == "s.series.json"
     s2 = RunStatus(p, throttle=0)
     s2.log(5, loss=1.0)
     s2.set(phase="grpo", reset_series=True)
     s2.log(1, loss=0.5)
     s2.finish()
-    assert read(tmp_path / "s.json.series.json")["series"]["loss"] == [[1, 0.5]]
+    assert read(tmp_path / "s.series.json")["series"]["loss"] == [[1, 0.5]]
 
 
 def test_default_path_follows_slurm(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("RUNSTATUS_PATH", raising=False)
+    monkeypatch.delenv("RUNSTATUS_DIR", raising=False)
     monkeypatch.setenv("SLURM_JOB_ID", "4242")
     RunStatus(throttle=0)
-    assert (tmp_path / "logs" / "run_status-4242.json").is_file()
+    assert (tmp_path / "run_status" / "4242.json").is_file()
+    assert (tmp_path / "run_status" / "4242.series.json").is_file()
+    monkeypatch.setenv("RUNSTATUS_DIR", str(tmp_path / "elsewhere"))
+    RunStatus(throttle=0)
+    assert (tmp_path / "elsewhere" / "4242.json").is_file()
     monkeypatch.setenv("RUNSTATUS_PATH", str(tmp_path / "x.json"))
     RunStatus(throttle=0)
     assert (tmp_path / "x.json").is_file()
+
+
+def test_prune_only_removes_old_own_files(tmp_path):
+    import os
+    import time
+
+    old = time.time() - 40 * 86400
+    for name in ("111.json", "111.series.json", "run_status.json", "notes.json", "222.json"):
+        f = tmp_path / name
+        f.write_text("{}")
+        if name != "222.json":
+            os.utime(f, (old, old))
+    RunStatus(tmp_path / "333.json", throttle=0)
+    left = sorted(p.name for p in tmp_path.iterdir())
+    assert left == ["222.json", "333.json", "333.series.json", "notes.json"]
+    RunStatus(tmp_path / "444.json", keep_days=None, throttle=0)  # None keeps everything
+
+
+def test_progress_never_exceeds_100_percent(tmp_path):
+    s = RunStatus(tmp_path / "s.json", throttle=0, total_steps=5000)
+    s.log(7770, loss=1.0)  # the declared total was wrong: it is raised, not exceeded
+    d = read(tmp_path / "s.json")["progress"]
+    assert d["pct"] == 100.0 and d["total_steps"] == 7770
+    s.set(total_steps=10000)  # a corrected total replaces the old one
+    assert read(tmp_path / "s.json")["progress"]["pct"] == 77.7
+    s.set(total_steps=0)  # 0 = unknown
+    assert read(tmp_path / "s.json")["progress"]["total_steps"] is None
+
+
+def test_structured_samples_roundtrip(tmp_path):
+    s = RunStatus(tmp_path / "s.json", throttle=0)
+    s.set(samples=[{"prompt": "p", "output": "o", "match": True, "rewards": {"bleu_reward": 0.5}, "total": 0.5}])
+    got = read(tmp_path / "s.json")["samples"][0]
+    assert got["rewards"] == {"bleu_reward": 0.5} and got["match"] is True
+
+
+def test_series_values_are_rounded(tmp_path):
+    s = RunStatus(tmp_path / "s.json", throttle=0)
+    s.log(1, loss=0.123456789123)
+    s.finish()
+    assert read(tmp_path / "s.series.json")["series"]["loss"] == [[1, 0.123457]]

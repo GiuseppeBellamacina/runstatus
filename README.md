@@ -16,7 +16,7 @@ flowchart LR
 
 ## Cosa vedi
 
-`python -m runstatus show logs/run_status.json` (aggiungi `--watch` per aggiornarlo ogni 2 s), con il file di esempio
+`python -m runstatus show run_status/<jobid>.json` (aggiungi `--watch` per aggiornarlo ogni 2 s), con il file di esempio
 [`examples/sample_run_status.json`](examples/sample_run_status.json):
 
 ```
@@ -37,7 +37,7 @@ Prova subito: `PYTHONPATH=src python examples/fake_rl_train.py out.json && PYTHO
 ```python
 from runstatus import RunStatus
 
-status = RunStatus("logs/run_status.json", kind="train", name="my-run", total_steps=1000)  # o env RUNSTATUS_PATH
+status = RunStatus("run_status/run.json", kind="train", name="my-run", total_steps=1000)  # o env RUNSTATUS_PATH
 status.set(phase="sft")
 status.log(step, loss=0.4, lr=1e-4)        # qualsiasi metrica numerica
 status.finish()                            # oppure status.fail("motivo")
@@ -72,14 +72,15 @@ attach_wandb(status)      # ogni wandb.log finisce anche nel file; salva id e mo
 
 | Opzione | Default | A cosa serve |
 | --- | --- | --- |
-| `path` | `$RUNSTATUS_PATH`, sotto SLURM `logs/run_status-<jobid>.json`, altrimenti `logs/run_status.json` | dove scrivere (le serie vanno in `<path>.series.json`) |
+| `path` | `$RUNSTATUS_PATH`, altrimenti `<$RUNSTATUS_DIR o run_status>/<jobid>.json` sotto SLURM, `.../run_status.json` altrimenti | dove scrivere: una cartella dedicata, separata dai log dello scheduler (le serie vanno in `<nome>.series.json`) |
+| `keep_days` | 30 | all'avvio cancella, nella stessa cartella, i **propri** file (`<jobid>.json`, `<jobid>.series.json`, `run_status.json`) più vecchi di N giorni; `None` per non cancellare |
 | `kind`, `name`, `total_steps` | `"train"`, `None`, `None` | etichette e calcolo di % ed ETA |
 | `include` / `exclude` | tutte / nessuna | glob sui nomi delle metriche, es. `exclude=["debug/*"]` |
 | `rename` | nessuno | `{"learning_rate": "lr"}` |
 | `best` | automatico | `{"eval_acc": "max"}`; di default `*loss*` min, `*reward*`/`*acc*`/`*f1*`/`*bleu*`… max |
 | `average` | `["*reward*"]` | metriche con media totale, media mobile (`window`, default 50) e min/max: utile in RL |
 | `series` | tutte | quali metriche tengono lo storico per i grafici |
-| `max_points` | 400 | oltre questo le serie vengono decimate (un punto ogni 2, 4, ...) |
+| `max_points` | 200 | oltre questo le serie vengono decimate (un punto ogni 2, 4, ...) |
 | `throttle` | 2 s | intervallo minimo tra due scritture (fase, eval, eventi, fine: scritte subito) |
 | `extra` | `{}` | dict libero (iperparametri, git sha, ...) sotto `"extra"` |
 
@@ -88,7 +89,8 @@ registrazione, es. deviazione standard delle reward), `log_eval`, `track_eval` (
 `on_save_event` (evento a ogni checkpoint), `extra`.
 
 **Altre chiamate**: `status.set(phase=, note=, epoch=, samples=, eval_active=, eval_progress=, extra=, wandb=)`,
-`status.event("testo")` per eventi liberi (restano gli ultimi 20). `status.set(phase="grpo", reset_series=True)` azzera i
+`samples` accetta anche oggetti, es. `{"prompt": ..., "output": ..., "match": true, "rewards": {"bleu_reward": 0.5}, "total": 0.5}`
+(l'app mostra le reward per componente). `status.event("testo")` per eventi liberi (restano gli ultimi 20). `status.set(phase="grpo", reset_series=True)` azzera i
 grafici quando il contatore di step riparte (es. SFT poi GRPO nello stesso processo).
 
 ## Monitoring con ClusterControl in 3 righe
@@ -100,7 +102,7 @@ dei log. Nel tuo train:
 from runstatus import RunStatus
 from runstatus.hf import RunStatusCallback
 
-status = RunStatus(kind="train", name="my-run")                 # sotto SLURM scrive logs/run_status-<jobid>.json
+status = RunStatus(kind="train", name="my-run")                 # sotto SLURM scrive run_status/<jobid>.json
 trainer = Trainer(..., callbacks=[RunStatusCallback(status)])   # HF/TRL; in un loop custom: status.log(step, loss=...)
 ```
 
@@ -108,8 +110,8 @@ Contratto con l'app (il `cluster_helper.sh` del progetto lo implementa; vedi t2g
 
 | Cosa | Dove |
 | --- | --- |
-| stato corrente (piccolo, riletto a ogni poll) | `<cartella progetto>/logs/run_status-<SLURM_JOB_ID>.json` |
-| serie per i grafici | `<file>.series.json` accanto, scritto ogni ~15 s e a fine run |
+| stato corrente (piccolo, riletto a ogni poll) | `<cartella progetto>/run_status/<SLURM_JOB_ID>.json` |
+| serie per i grafici | `<SLURM_JOB_ID>.series.json` accanto, scritto ogni ~15 s e a fine run |
 | campi usati dall'app | `run.kind/phase/state`, `progress.step/total_steps/pct/eta_s`, `metrics.latest/best/mean`, `eval.active`, `series` |
 
 Il job deve girare con la cartella del progetto come directory corrente (o impostare `RUNSTATUS_PATH`), e il nome SLURM
@@ -134,11 +136,14 @@ Il job deve girare con la cartella del progetto come directory corrente (o impos
  "samples": [], "events": [{"t": "...", "step": 100, "msg": "checkpoint saved at step 100"}],
  "extra": {"model": "demo-0.5b", "lr": 1e-05},
  "gpu": {"mem_gb": 11.4},
- "series_file": "run_status-123.json.series.json", "note": null
+ "series_file": "123.series.json", "note": null
 }
 ```
 
-Sidecar `<file>.series.json`: `{"schema": 3, "run_id": "...", "total_steps": 500, "phase": "grpo", "series": {"loss": [[10, 0.33], [20, 0.23]], "reward": [[10, 0.10], [20, 0.08]]}}`.
+Sidecar `<nome>.series.json` (valori a 6 cifre significative): `{"schema": 3, "run_id": "...", "total_steps": 500, "phase": "grpo", "series": {"loss": [[10, 0.33], [20, 0.23]], "reward": [[10, 0.10], [20, 0.08]]}}`.
+
+Il totale degli step è sempre coerente: con `RunStatusCallback` viene da `state.max_steps` del Trainer, la percentuale
+non supera mai 100 (un passo oltre il totale dichiarato alza il totale) e `total_steps=0` significa "sconosciuto".
 
 Garanzie: scrittura atomica (un lettore non vede mai un file a metà), nessuna eccezione verso il training (al primo
 errore l'helper si disattiva e lo dice una volta), `NaN` e valori non numerici ignorati. L'ETA usa il ritmo osservato
