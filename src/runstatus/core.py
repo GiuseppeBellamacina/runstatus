@@ -174,7 +174,9 @@ class RunStatus:
             self._warn(e)
 
     def _reset_series(self) -> None:
+        """New stage: the step counter restarts, so charts, progress and total all start over."""
         self.d["series"], self._seen, self._stride, self._first = {}, {}, 1, None
+        self.d["progress"].update(step=None, total_steps=None, pct=None, eta_s=None, steps_per_s=None)
 
     def event(self, message: str, *, write: bool = True) -> None:
         """Append a short event (checkpoint saved, eval done, ...) to the recent-events list."""

@@ -191,3 +191,14 @@ def test_series_values_are_rounded(tmp_path):
     s.log(1, loss=0.123456789123)
     s.finish()
     assert read(tmp_path / "s.series.json")["series"]["loss"] == [[1, 0.123457]]
+
+
+def test_new_stage_does_not_inherit_the_previous_step(tmp_path):
+    s = RunStatus(tmp_path / "s.json", throttle=0)
+    s.set(phase="sft", total_steps=7770)
+    s.log(7770, loss=1.0)
+    s.set(phase="grpo", reset_series=True, total_steps=5000)
+    d = read(tmp_path / "s.json")["progress"]
+    assert d["step"] is None and d["total_steps"] == 5000 and d["pct"] is None
+    s.log(10, loss=0.5)
+    assert read(tmp_path / "s.json")["progress"]["total_steps"] == 5000
