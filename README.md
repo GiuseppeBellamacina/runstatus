@@ -112,7 +112,7 @@ status.describe(method="ppo")            # cambia i metadati in qualsiasi moment
 
 `stage()` chiude la fase precedente salvando lo step raggiunto, azzera contatori e grafici (`reset=False` per tenerli) e
 aggiorna `phase`. `finish()`/`fail()` chiudono l'ultima fase come `done`/`failed`. Le icone sono id semplici: il monitor
-li traduce in un disegno e, se non li conosce, mostra il testo (un emoji va bene). Ids conosciuti da ClusterControl:
+li traduce in un disegno e, se non li conosce, mostra solo il testo (ClusterControl disegna icone SVG a linea, non emoji). Ids conosciuti da ClusterControl:
 `train`, `eval`, `inference`, `sft`, `grpo`, `ppo`, `dpo`, `rl`, `pretrain`, `finetune`, `distill`, `llm`, `nn`, `cnn`,
 `rnn`, `transformer`, `ml`, `tree`, `diffusion`, `vision`, `speech`, `gpu`, `data`.
 
