@@ -202,3 +202,40 @@ def test_new_stage_does_not_inherit_the_previous_step(tmp_path):
     assert d["step"] is None and d["total_steps"] == 5000 and d["pct"] is None
     s.log(10, loss=0.5)
     assert read(tmp_path / "s.json")["progress"]["total_steps"] == 5000
+
+
+def test_describe_and_stages_stepper(tmp_path):
+    p = tmp_path / "s.json"
+    s = RunStatus(p, throttle=0, method="sft", stages=["sft", {"id": "grpo", "label": "GRPO", "icon": "rl"}, "eval"],
+                  model={"family": "llm", "name": "Qwen", "params": "0.5B"}, badges=["LoRA", {"label": "4-bit", "icon": "gpu"}])
+    r = read(p)["run"]
+    assert [x["state"] for x in r["stages"]] == ["pending"] * 3 and r["stage"] is None
+    assert r["model"]["family"] == "llm" and r["badges"][0] == {"label": "LoRA", "icon": None}
+    s.stage("sft", total_steps=100)
+    s.log(100, loss=1.0)
+    s.stage("grpo", method="grpo", total_steps=50)
+    r = read(p)["run"]
+    assert [x["state"] for x in r["stages"]] == ["done", "running", "pending"]
+    assert r["stages"][0]["step"] == 100 and r["stages"][0]["total"] == 100
+    assert r["stage"] == r["phase"] == "grpo" and r["method"] == "grpo"
+    assert read(p)["progress"]["step"] is None, "the new stage starts from zero"
+    s.stage("cleanup")  # a stage that was not planned is appended
+    assert [x["id"] for x in read(p)["run"]["stages"]][-1] == "cleanup"
+    s.finish()
+    assert [x["state"] for x in read(p)["run"]["stages"]][-1] == "done"
+    s2 = RunStatus(tmp_path / "t.json", throttle=0, stages=["a"])
+    s2.stage("a")
+    s2.fail("boom")
+    assert read(tmp_path / "t.json")["run"]["stages"][0]["state"] == "failed"
+    s2.describe(method="ppo", stages=["x", "y"])
+    assert read(tmp_path / "t.json")["run"]["method"] == "ppo"
+
+
+def test_hf_callback_enters_its_stage(tmp_path):
+    p = tmp_path / "s.json"
+    s = RunStatus(p, throttle=0, stages=["sft", "grpo"])
+    cb = RunStatusCallback(s, phase="grpo")
+    st = types.SimpleNamespace(is_local_process_zero=True, max_steps=40, global_step=0, epoch=0)
+    cb.on_train_begin(None, st, None)
+    r = read(p)
+    assert r["run"]["stage"] == "grpo" and r["progress"]["total_steps"] == 40

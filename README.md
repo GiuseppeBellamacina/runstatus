@@ -93,6 +93,29 @@ registrazione, es. deviazione standard delle reward), `log_eval`, `track_eval` (
 (l'app mostra le reward per componente). `status.event("testo")` per eventi liberi (restano gli ultimi 20). `status.set(phase="grpo", reset_series=True)` azzera i
 grafici quando il contatore di step riparte (es. SFT poi GRPO nello stesso processo).
 
+## Che cosa sta girando: fasi, algoritmo, modello
+
+Il file dice anche *che tipo* di run è, così il monitor può mostrarlo (con le icone) senza saperne nulla in anticipo:
+
+```python
+status = RunStatus(
+    kind="train", name="my-run",
+    method="grpo",                                                   # sft, grpo, ppo, dpo, supervised, pretraining, ...
+    model={"family": "llm", "name": "Qwen2.5-0.5B", "params": "0.5B"},  # family: llm, nn, cnn, transformer, ml, ...
+    stages=["sft", "grpo", {"id": "eval", "label": "Valutazione", "icon": "eval"}],   # il piano, mostrato come stepper
+    badges=["LoRA", {"label": "4-bit", "icon": "gpu"}],              # chip liberi
+)
+status.stage("sft", total_steps=7770)    # entra nella fase: chiude la precedente, riparte da zero
+status.stage("grpo", method="grpo")      # una fase fuori piano viene aggiunta
+status.describe(method="ppo")            # cambia i metadati in qualsiasi momento
+```
+
+`stage()` chiude la fase precedente salvando lo step raggiunto, azzera contatori e grafici (`reset=False` per tenerli) e
+aggiorna `phase`. `finish()`/`fail()` chiudono l'ultima fase come `done`/`failed`. Le icone sono id semplici: il monitor
+li traduce in un disegno e, se non li conosce, mostra il testo (un emoji va bene). Ids conosciuti da ClusterControl:
+`train`, `eval`, `inference`, `sft`, `grpo`, `ppo`, `dpo`, `rl`, `pretrain`, `finetune`, `distill`, `llm`, `nn`, `cnn`,
+`rnn`, `transformer`, `ml`, `tree`, `diffusion`, `vision`, `speech`, `gpu`, `data`.
+
 ## Monitoring con ClusterControl in 3 righe
 
 [ClusterControl](https://github.com/GiuseppeBellamacina/cluster-control-android) legge questi file via ssh: non fa parsing
@@ -112,7 +135,7 @@ Contratto con l'app (il `cluster_helper.sh` del progetto lo implementa; vedi t2g
 | --- | --- |
 | stato corrente (piccolo, riletto a ogni poll) | `<cartella progetto>/run_status/<SLURM_JOB_ID>.json` |
 | serie per i grafici | `<SLURM_JOB_ID>.series.json` accanto, scritto ogni ~15 s e a fine run |
-| campi usati dall'app | `run.kind/phase/state`, `progress.step/total_steps/pct/eta_s`, `metrics.latest/best/mean`, `eval.active`, `series` |
+| campi usati dall'app | `run.kind/phase/state/method/model/stage/stages/badges`, `progress.step/total_steps/pct/eta_s`, `metrics.latest/best/mean`, `eval.active`, `series` |
 
 Il job deve girare con la cartella del progetto come directory corrente (o impostare `RUNSTATUS_PATH`), e il nome SLURM
 `train-<tag>` / `eval-<tag>` come richiede l'app. Installazione: `pip install https://github.com/GiuseppeBellamacina/runstatus/archive/refs/tags/v0.2.0.zip`.
