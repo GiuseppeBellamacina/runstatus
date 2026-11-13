@@ -72,7 +72,7 @@ attach_wandb(status)      # ogni wandb.log finisce anche nel file; salva id e mo
 
 | Opzione | Default | A cosa serve |
 | --- | --- | --- |
-| `path` | `$RUNSTATUS_PATH` o `logs/run_status.json` | dove scrivere |
+| `path` | `$RUNSTATUS_PATH`, sotto SLURM `logs/run_status-<jobid>.json`, altrimenti `logs/run_status.json` | dove scrivere (le serie vanno in `<path>.series.json`) |
 | `kind`, `name`, `total_steps` | `"train"`, `None`, `None` | etichette e calcolo di % ed ETA |
 | `include` / `exclude` | tutte / nessuna | glob sui nomi delle metriche, es. `exclude=["debug/*"]` |
 | `rename` | nessuno | `{"learning_rate": "lr"}` |
@@ -82,16 +82,40 @@ attach_wandb(status)      # ogni wandb.log finisce anche nel file; salva id e mo
 | `max_points` | 400 | oltre questo le serie vengono decimate (un punto ogni 2, 4, ...) |
 | `throttle` | 2 s | intervallo minimo tra due scritture (fase, eval, eventi, fine: scritte subito) |
 | `extra` | `{}` | dict libero (iperparametri, git sha, ...) sotto `"extra"` |
-| `compat_keys` | `True` | scrive anche le chiavi piatte `step, total_steps, phase, loss, reward, ...` |
 
 **`RunStatusCallback(status, ...)`**: `phase`, `transform(logs, state) -> dict` (calcola o filtra metriche prima della
 registrazione, es. deviazione standard delle reward), `log_eval`, `track_eval` (segnala l'eval in corso),
 `on_save_event` (evento a ogni checkpoint), `extra`.
 
 **Altre chiamate**: `status.set(phase=, note=, epoch=, samples=, eval_active=, eval_progress=, extra=, wandb=)`,
-`status.event("testo")` per eventi liberi (restano gli ultimi 20).
+`status.event("testo")` per eventi liberi (restano gli ultimi 20). `status.set(phase="grpo", reset_series=True)` azzera i
+grafici quando il contatore di step riparte (es. SFT poi GRPO nello stesso processo).
 
-## Il file (schema 2)
+## Monitoring con ClusterControl in 3 righe
+
+[ClusterControl](https://github.com/GiuseppeBellamacina/cluster-control-android) legge questi file via ssh: non fa parsing
+dei log. Nel tuo train:
+
+```python
+from runstatus import RunStatus
+from runstatus.hf import RunStatusCallback
+
+status = RunStatus(kind="train", name="my-run")                 # sotto SLURM scrive logs/run_status-<jobid>.json
+trainer = Trainer(..., callbacks=[RunStatusCallback(status)])   # HF/TRL; in un loop custom: status.log(step, loss=...)
+```
+
+Contratto con l'app (il `cluster_helper.sh` del progetto lo implementa; vedi t2g):
+
+| Cosa | Dove |
+| --- | --- |
+| stato corrente (piccolo, riletto a ogni poll) | `<cartella progetto>/logs/run_status-<SLURM_JOB_ID>.json` |
+| serie per i grafici | `<file>.series.json` accanto, scritto ogni ~15 s e a fine run |
+| campi usati dall'app | `run.kind/phase/state`, `progress.step/total_steps/pct/eta_s`, `metrics.latest/best/mean`, `eval.active`, `series` |
+
+Il job deve girare con la cartella del progetto come directory corrente (o impostare `RUNSTATUS_PATH`), e il nome SLURM
+`train-<tag>` / `eval-<tag>` come richiede l'app. Installazione: `pip install https://github.com/GiuseppeBellamacina/runstatus/archive/refs/tags/v0.2.0.zip`.
+
+## Il file (schema 3)
 
 ```json
 {
@@ -105,15 +129,16 @@ registrazione, es. deviazione standard delle reward), `log_eval`, `track_eval` (
    "mean":   {"reward": 0.506},  "moving": {"reward": 0.71},
    "stats":  {"reward": {"min": 0.076, "max": 0.904}}
  },
- "series": {"loss": [[10, 0.33], [20, 0.23]], "reward": [[10, 0.10], [20, 0.08]]},
  "eval": {"active": false, "progress": null},
  "wandb": {"id": "dew3jc9h", "url": null, "mode": "offline"},
  "samples": [], "events": [{"t": "...", "step": 100, "msg": "checkpoint saved at step 100"}],
  "extra": {"model": "demo-0.5b", "lr": 1e-05},
  "gpu": {"mem_gb": 11.4},
- "note": null
+ "series_file": "run_status-123.json.series.json", "note": null
 }
 ```
+
+Sidecar `<file>.series.json`: `{"schema": 3, "run_id": "...", "total_steps": 500, "phase": "grpo", "series": {"loss": [[10, 0.33], [20, 0.23]], "reward": [[10, 0.10], [20, 0.08]]}}`.
 
 Garanzie: scrittura atomica (un lettore non vede mai un file a metà), nessuna eccezione verso il training (al primo
 errore l'helper si disattiva e lo dice una volta), `NaN` e valori non numerici ignorati. L'ETA usa il ritmo osservato

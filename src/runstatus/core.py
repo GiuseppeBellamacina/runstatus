@@ -18,7 +18,17 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA = 2
+SCHEMA = 3
+SERIES_EVERY = 15.0  # seconds between sidecar (series file) writes
+
+
+def default_path() -> Path:
+    """$RUNSTATUS_PATH, else logs/run_status-<SLURM_JOB_ID>.json under SLURM, else logs/run_status.json."""
+    env = os.environ.get("RUNSTATUS_PATH")
+    if env:
+        return Path(env)
+    job = os.environ.get("SLURM_JOB_ID")
+    return Path("logs") / (f"run_status-{job}.json" if job else "run_status.json")
 
 # direction used to track the best value when `best` does not say otherwise
 _AUTO_BEST = (("*loss*", "min"), ("*error*", "min"), ("*perplexity*", "min"), ("*kl*", None),
@@ -33,11 +43,11 @@ def _match(key: str, patterns: Iterable[str] | None) -> bool:
 class RunStatus:
     """
     Args:
-        path: status file (default env RUNSTATUS_PATH or logs/run_status.json).
+        path: status file (default: see default_path). Series go to the sidecar ``<path>.series.json`` so the
+            main file stays small enough to be read on every poll.
         kind: free label, e.g. "train", "eval", "rl".
         throttle: min seconds between non-forced writes.
         max_points: max points per series (decimated beyond that).
-        compat_keys: also write flat step/total_steps/phase/loss/reward keys.
         include / exclude: glob patterns on metric names (applied before rename).
         rename: {"learning_rate": "lr", ...} applied to metric names.
         best: {"eval_loss": "min", "reward": "max"}; unlisted names use name-based defaults.
@@ -51,14 +61,16 @@ class RunStatus:
 
     def __init__(self, path: str | os.PathLike | None = None, *, kind: str = "train",
                  name: str | None = None, total_steps: int | None = None,
-                 throttle: float = 2.0, max_points: int = 400, compat_keys: bool = True,
+                 throttle: float = 2.0, max_points: int = 400,
                  include: list[str] | None = None, exclude: list[str] | None = None,
                  rename: dict[str, str] | None = None, best: dict[str, str] | None = None,
                  average: list[str] | None = None, window: int = 50,
                  series: list[str] | None = None, extra: dict[str, Any] | None = None,
                  events_max: int = 20):
-        self.path = Path(path or os.environ.get("RUNSTATUS_PATH") or "logs/run_status.json")
-        self.throttle, self.max_points, self.compat = throttle, max_points, compat_keys
+        self.path = Path(path) if path else default_path()
+        self.series_path = self.path.with_name(self.path.name + ".series.json")
+        self._series_at = 0.0
+        self.throttle, self.max_points = throttle, max_points
         self.include, self.exclude, self.rename = include, exclude or [], rename or {}
         self.best_rules = best or {}
         self.average = ["*reward*"] if average is None else average
@@ -99,9 +111,13 @@ class RunStatus:
     def set(self, *, phase: str | None = None, note: str | None = None, total_steps: int | None = None,
             epoch: float | None = None, wandb: dict | None = None, samples: list | None = None,
             eval_active: bool | None = None, eval_progress: str | None = None,
-            extra: dict[str, Any] | None = None, force: bool = False) -> None:
-        """Update non-metric state. ``extra`` is merged into the free-form "extra" dict (None value deletes a key)."""
+            extra: dict[str, Any] | None = None, reset_series: bool = False,
+            force: bool = False) -> None:
+        """Update non-metric state. ``reset_series`` clears the charts (use when the step counter restarts). ``extra`` is merged into the free-form "extra" dict (None value deletes a key)."""
         try:
+            if reset_series:
+                self._reset_series()
+                force = True
             if phase is not None and phase != self.d["run"]["phase"]:
                 self.d["run"]["phase"] = phase
                 self.event(f"phase: {phase}", write=False)
@@ -133,6 +149,9 @@ class RunStatus:
             self._write(force)
         except Exception as e:  # never break the training
             self._warn(e)
+
+    def _reset_series(self) -> None:
+        self.d["series"], self._seen, self._stride, self._first = {}, {}, 1, None
 
     def event(self, message: str, *, write: bool = True) -> None:
         """Append a short event (checkpoint saved, eval done, ...) to the recent-events list."""
@@ -267,21 +286,24 @@ class RunStatus:
             return
         self._last_write = now
         self.d["run"]["updated_at"] = self._iso(time.time())
-        out = dict(self.d)
+        out = {k: v for k, v in self.d.items() if k != "series"}
         out["gpu"] = self._gpu()
-        if self.compat:  # flat keys read by the current ClusterControl live status
-            p, lat = self.d["progress"], self.d["metrics"]["latest"]
-            out.update(step=p["step"], total_steps=p["total_steps"], phase=self.d["run"]["phase"],
-                       loss=lat.get("loss"), reward=lat.get("reward"), ts=self.d["run"]["updated_at"],
-                       reward_avg=self.d["metrics"]["mean"].get("reward"), epoch=p["epoch"],
-                       eval_active=self.d["eval"]["active"], eval_loss=lat.get("eval_loss"))
+        out["series_file"] = self.series_path.name
+        self._dump(self.path, out)
+        if force or time.monotonic() - self._series_at >= SERIES_EVERY:
+            self._series_at = time.monotonic()
+            self._dump(self.series_path, {"schema": SCHEMA, "run_id": self.d["run"]["id"],
+                                          "total_steps": self.d["progress"]["total_steps"],
+                                          "phase": self.d["run"]["phase"], "series": self.d["series"]})
+
+    def _dump(self, target: Path, payload: dict) -> None:
         tmp = None
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".run_status.", suffix=".tmp")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".run_status.", suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(out, f, ensure_ascii=False)
-            os.replace(tmp, self.path)
+                json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, target)
         except Exception as e:
             self._warn(e)
             if tmp:
