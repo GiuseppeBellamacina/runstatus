@@ -47,7 +47,7 @@ def main(argv: list[str]) -> int:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
         try:  # series live in the sidecar file
-            with open(path + ".series.json", encoding="utf-8") as f:
+            with open(path.removesuffix(".json") + ".series.json", encoding="utf-8") as f:
                 d["series"] = json.load(f)["series"]
         except (OSError, ValueError):
             d["series"] = {}
