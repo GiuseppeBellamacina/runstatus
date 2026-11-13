@@ -197,11 +197,13 @@ class RunStatus:
         except Exception as e:  # never break the training
             self._warn(e)
 
-    def describe(self, *, method: str | None = None, model: dict[str, Any] | None = None,
+    def describe(self, *, kind: str | None = None, method: str | None = None, model: dict[str, Any] | None = None,
                  badges: list[Any] | None = None, stages: list[Any] | None = None) -> None:
-        """Set or change what the run is: algorithm, model, chips and the planned stages (replaced when given)."""
+        """Set or change what the run is: kind, algorithm, model, chips and the planned stages (replaced when given)."""
         try:
             r = self.d["run"]
+            if kind is not None:
+                r["kind"] = kind
             if method is not None:
                 r["method"] = method
             if model is not None:
