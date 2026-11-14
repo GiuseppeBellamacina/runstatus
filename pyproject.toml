@@ -1,8 +1,25 @@
 [project]
 name = "runstatus"
 version = "0.2.0"
-description = "Generic training status file writer (HF callback, wandb hook, manual API)"
+description = "Generic training status file for monitors: HF/TRL callback, wandb hook, RL reward stats, atomic and fail-safe"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Giuseppe Bellamacina" }]
 requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+hf = ["transformers"]
+wandb = ["wandb"]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/GiuseppeBellamacina/runstatus"
+ClusterControl = "https://github.com/GiuseppeBellamacina/cluster-control-android"
 
 [build-system]
 requires = ["setuptools>=61"]
