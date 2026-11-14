@@ -23,8 +23,15 @@ def render(d: dict) -> str:
     bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
     eta = p.get("eta_s")
     eta_s = f"  ETA {eta // 3600}h{eta % 3600 // 60:02d}m" if eta else ""
-    lines = [f"{r.get('name') or r['id']}  [{r['kind']}]  {r['state'].upper()}  phase={r.get('phase')}",
+    model = r.get("model") or {}
+    what = " ".join(str(x) for x in (r.get("method"), model.get("family"), model.get("name"), model.get("params")) if x)
+    lines = [f"{r.get('name') or r['id']}  [{r['kind']}]  {r['state'].upper()}  {what or 'phase=' + str(r.get('phase'))}",
              f"{bar} {pct:5.1f}%  step {p.get('step')}/{p.get('total_steps')}{eta_s}"]
+    mark = {"done": "✓", "running": "▶", "failed": "✗", "pending": "·"}
+    if r.get("stages"):
+        lines.insert(1, " → ".join(f"{x['label']} {mark.get(x['state'], '')}" for x in r["stages"]))
+    if r.get("badges"):
+        lines.insert(1, "  ".join(f"[{b['label']}]" for b in r["badges"]))
     if d.get("eval", {}).get("active"):
         lines.append("eval in progress")
     for k, v in m["latest"].items():
@@ -42,10 +49,16 @@ def render(d: dict) -> str:
 
 def main(argv: list[str]) -> int:
     args = [a for a in argv if not a.startswith("--")]
-    path = args[1] if len(args) > 1 else "logs/run_status.json"
+    path = args[1] if len(args) > 1 else "run_status/run_status.json"
     while True:
         with open(path, encoding="utf-8") as f:
-            print(render(json.load(f)))
+            d = json.load(f)
+        try:  # series live in the sidecar file
+            with open(path.removesuffix(".json") + ".series.json", encoding="utf-8") as f:
+                d["series"] = json.load(f)["series"]
+        except (OSError, ValueError):
+            d["series"] = {}
+        print(render(d))
         if "--watch" not in argv:
             return 0
         time.sleep(2)

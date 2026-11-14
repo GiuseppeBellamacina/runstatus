@@ -17,7 +17,8 @@ class RunStatusCallback(TrainerCallback):
     """
     Args:
         status: the RunStatus to feed.
-        phase: phase label set at train begin (e.g. "sft", "grpo").
+        phase: stage entered at train begin (e.g. "sft", "grpo"): see RunStatus.stage; may be left out when the
+            script moves between stages itself.
         transform: optional ``f(logs: dict, state) -> dict`` to derive/clean metrics before they are recorded
             (e.g. compute reward std, drop keys, flatten nested values).
         log_eval: record the metrics of on_evaluate.
@@ -35,14 +36,19 @@ class RunStatusCallback(TrainerCallback):
 
     def on_train_begin(self, args, state, control, **kw):
         if state.is_local_process_zero:
-            self.status.set(total_steps=state.max_steps or None, phase=self.phase, extra=self.extra)
+            if self.phase:
+                self.status.stage(self.phase, total_steps=state.max_steps or None)
+            else:
+                self.status.set(total_steps=state.max_steps or None)
+            if self.extra:
+                self.status.set(extra=self.extra)
 
     def on_log(self, args, state, control, logs: dict[str, Any] | None = None, **kw):
         if state.is_local_process_zero and logs:
             logs = {k: v for k, v in logs.items() if k not in _SKIP}
             if self.transform:
                 logs = self.transform(logs, state) or {}
-            self.status.set(epoch=state.epoch)
+            self.status.set(epoch=state.epoch, total_steps=state.max_steps or None)  # the trainer knows the real total
             self.status.log(state.global_step, **logs)
 
     def on_prediction_step(self, args, state, control, **kw):

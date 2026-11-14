@@ -10,7 +10,7 @@ def read(p):
     return json.loads(p.read_text())
 
 
-def test_log_progress_compat_and_best(tmp_path):
+def test_log_progress_and_best(tmp_path):
     p = tmp_path / "s.json"
     s = RunStatus(p, total_steps=100, throttle=0, kind="eval")
     s.set(phase="grpo")
@@ -18,7 +18,8 @@ def test_log_progress_compat_and_best(tmp_path):
     s.log(20, loss=0.7, reward=float("nan"))
     d = read(p)
     assert d["run"]["kind"] == "eval" and d["progress"]["pct"] == 20.0
-    assert d["step"] == 20 and d["loss"] == 0.7 and d["phase"] == "grpo" and d["reward"] == 0.2
+    assert d["progress"]["step"] == 20 and d["metrics"]["latest"]["loss"] == 0.7 and d["run"]["phase"] == "grpo"
+    assert d["metrics"]["latest"]["reward"] == 0.2 and "series" not in d
     assert d["metrics"]["best"]["loss"] == 0.5
     s.finish()
     d = read(p)
@@ -49,7 +50,7 @@ def test_hf_callback(tmp_path):
     cb.on_log(None, st, None, logs={"loss": 1.5, "total_flos": 3, "epoch": 0.1})
     cb.on_train_end(None, st, None)
     d = read(p)
-    assert d["progress"]["total_steps"] == 50 and d["loss"] == 1.5 and d["run"]["state"] == "finished"
+    assert d["progress"]["total_steps"] == 50 and d["metrics"]["latest"]["loss"] == 1.5 and d["run"]["state"] == "finished"
 
 
 def test_wandb_hook(tmp_path):
@@ -61,7 +62,7 @@ def test_wandb_hook(tmp_path):
     attach_wandb(s, fake)
     fake.log({"loss": 2.0}, step=7)
     d = read(p)
-    assert calls == [{"loss": 2.0}] and d["step"] == 7 and d["wandb"]["id"] == "abc"
+    assert calls == [{"loss": 2.0}] and d["progress"]["step"] == 7 and d["wandb"]["id"] == "abc"
 
 
 def test_rl_rewards_stats_and_best(tmp_path):
@@ -79,9 +80,10 @@ def test_include_exclude_rename_best_rule(tmp_path):
                   best={"custom": "max"}, series=["loss"])
     s.log(1, **{"debug/x": 1.0, "learning_rate": 0.1, "custom": 3.0, "loss": 2.0})
     s.log(2, custom=2.0, loss=1.0)
+    s.finish()  # forces the series sidecar
     d = read(tmp_path / "s.json")
     assert "debug/x" not in d["metrics"]["latest"] and d["metrics"]["latest"]["lr"] == 0.1
-    assert d["metrics"]["best"]["custom"] == 3.0 and list(d["series"]) == ["loss"]
+    assert d["metrics"]["best"]["custom"] == 3.0 and list(read(tmp_path / "s.series.json")["series"]) == ["loss"]
 
 
 def test_extra_events_eval_and_context_manager(tmp_path):
@@ -114,3 +116,126 @@ def test_hf_transform_eval_and_save(tmp_path):
     assert d["metrics"]["latest"]["double"] == 2.0 and d["eval"]["active"] is False
     assert d["metrics"]["best"]["eval_loss"] == 0.4 and d["run"]["phase"] == "grpo"
     assert any("checkpoint" in e["msg"] for e in d["events"])
+
+
+def test_sidecar_and_reset_series(tmp_path):
+    p = tmp_path / "s.json"
+    s = RunStatus(p, throttle=0, total_steps=100)
+    s.set(phase="sft")
+    for i in (1, 2, 3):
+        s.log(i, loss=1.0 / i)
+    s.finish()
+    side = read(tmp_path / "s.series.json")
+    assert [pt[0] for pt in side["series"]["loss"]] == [1, 2, 3] and side["total_steps"] == 100
+    assert read(p)["series_file"] == "s.series.json"
+    s2 = RunStatus(p, throttle=0)
+    s2.log(5, loss=1.0)
+    s2.set(phase="grpo", reset_series=True)
+    s2.log(1, loss=0.5)
+    s2.finish()
+    assert read(tmp_path / "s.series.json")["series"]["loss"] == [[1, 0.5]]
+
+
+def test_default_path_follows_slurm(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RUNSTATUS_PATH", raising=False)
+    monkeypatch.delenv("RUNSTATUS_DIR", raising=False)
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    RunStatus(throttle=0)
+    assert (tmp_path / "run_status" / "4242.json").is_file()
+    assert (tmp_path / "run_status" / "4242.series.json").is_file()
+    monkeypatch.setenv("RUNSTATUS_DIR", str(tmp_path / "elsewhere"))
+    RunStatus(throttle=0)
+    assert (tmp_path / "elsewhere" / "4242.json").is_file()
+    monkeypatch.setenv("RUNSTATUS_PATH", str(tmp_path / "x.json"))
+    RunStatus(throttle=0)
+    assert (tmp_path / "x.json").is_file()
+
+
+def test_prune_only_removes_old_own_files(tmp_path):
+    import os
+    import time
+
+    old = time.time() - 40 * 86400
+    for name in ("111.json", "111.series.json", "run_status.json", "notes.json", "222.json"):
+        f = tmp_path / name
+        f.write_text("{}")
+        if name != "222.json":
+            os.utime(f, (old, old))
+    RunStatus(tmp_path / "333.json", throttle=0)
+    left = sorted(p.name for p in tmp_path.iterdir())
+    assert left == ["222.json", "333.json", "333.series.json", "notes.json"]
+    RunStatus(tmp_path / "444.json", keep_days=None, throttle=0)  # None keeps everything
+
+
+def test_progress_never_exceeds_100_percent(tmp_path):
+    s = RunStatus(tmp_path / "s.json", throttle=0, total_steps=5000)
+    s.log(7770, loss=1.0)  # the declared total was wrong: it is raised, not exceeded
+    d = read(tmp_path / "s.json")["progress"]
+    assert d["pct"] == 100.0 and d["total_steps"] == 7770
+    s.set(total_steps=10000)  # a corrected total replaces the old one
+    assert read(tmp_path / "s.json")["progress"]["pct"] == 77.7
+    s.set(total_steps=0)  # 0 = unknown
+    assert read(tmp_path / "s.json")["progress"]["total_steps"] is None
+
+
+def test_structured_samples_roundtrip(tmp_path):
+    s = RunStatus(tmp_path / "s.json", throttle=0)
+    s.set(samples=[{"prompt": "p", "output": "o", "match": True, "rewards": {"bleu_reward": 0.5}, "total": 0.5}])
+    got = read(tmp_path / "s.json")["samples"][0]
+    assert got["rewards"] == {"bleu_reward": 0.5} and got["match"] is True
+
+
+def test_series_values_are_rounded(tmp_path):
+    s = RunStatus(tmp_path / "s.json", throttle=0)
+    s.log(1, loss=0.123456789123)
+    s.finish()
+    assert read(tmp_path / "s.series.json")["series"]["loss"] == [[1, 0.123457]]
+
+
+def test_new_stage_does_not_inherit_the_previous_step(tmp_path):
+    s = RunStatus(tmp_path / "s.json", throttle=0)
+    s.set(phase="sft", total_steps=7770)
+    s.log(7770, loss=1.0)
+    s.set(phase="grpo", reset_series=True, total_steps=5000)
+    d = read(tmp_path / "s.json")["progress"]
+    assert d["step"] is None and d["total_steps"] == 5000 and d["pct"] is None
+    s.log(10, loss=0.5)
+    assert read(tmp_path / "s.json")["progress"]["total_steps"] == 5000
+
+
+def test_describe_and_stages_stepper(tmp_path):
+    p = tmp_path / "s.json"
+    s = RunStatus(p, throttle=0, method="sft", stages=["sft", {"id": "grpo", "label": "GRPO", "icon": "rl"}, "eval"],
+                  model={"family": "llm", "name": "Qwen", "params": "0.5B"}, badges=["LoRA", {"label": "4-bit", "icon": "gpu"}])
+    r = read(p)["run"]
+    assert [x["state"] for x in r["stages"]] == ["pending"] * 3 and r["stage"] is None
+    assert r["model"]["family"] == "llm" and r["badges"][0] == {"label": "LoRA", "icon": None}
+    s.stage("sft", total_steps=100)
+    s.log(100, loss=1.0)
+    s.stage("grpo", method="grpo", total_steps=50)
+    r = read(p)["run"]
+    assert [x["state"] for x in r["stages"]] == ["done", "running", "pending"]
+    assert r["stages"][0]["step"] == 100 and r["stages"][0]["total"] == 100
+    assert r["stage"] == r["phase"] == "grpo" and r["method"] == "grpo"
+    assert read(p)["progress"]["step"] is None, "the new stage starts from zero"
+    s.stage("cleanup")  # a stage that was not planned is appended
+    assert [x["id"] for x in read(p)["run"]["stages"]][-1] == "cleanup"
+    s.finish()
+    assert [x["state"] for x in read(p)["run"]["stages"]][-1] == "done"
+    s2 = RunStatus(tmp_path / "t.json", throttle=0, stages=["a"])
+    s2.stage("a")
+    s2.fail("boom")
+    assert read(tmp_path / "t.json")["run"]["stages"][0]["state"] == "failed"
+    s2.describe(method="ppo", stages=["x", "y"])
+    assert read(tmp_path / "t.json")["run"]["method"] == "ppo"
+
+
+def test_hf_callback_enters_its_stage(tmp_path):
+    p = tmp_path / "s.json"
+    s = RunStatus(p, throttle=0, stages=["sft", "grpo"])
+    cb = RunStatusCallback(s, phase="grpo")
+    st = types.SimpleNamespace(is_local_process_zero=True, max_steps=40, global_step=0, epoch=0)
+    cb.on_train_begin(None, st, None)
+    r = read(p)
+    assert r["run"]["stage"] == "grpo" and r["progress"]["total_steps"] == 40
